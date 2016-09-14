@@ -422,3 +422,77 @@ class PatientChildrenWatch(object):
     def _children_watcher(self, async, event):
         self.children_changed.set()
         async.set(time.time())
+
+
+class PatientDataWatch(object):
+    
+    """Patient Data Watch that returns data on a znode after it
+       has not been updated for a period of time
+
+      The motivation behind this class is the following:
+          We need to dynamically (and in parallel) process multiple updates to a 
+          certain znode, but we will only care about the last write that happened to that znode.
+          Thus, with this watch we are able to process local (or remote) data update after
+          a znode has been stable for a period of time
+
+    Example::
+
+        watcher = PatientDataWatch(client, '/some/path', time_boundary=5)
+        async_object = watcher.start()
+
+        # The next call blocks until the data has not changed for time boundary
+        # (5 in this case) seconds, returns data and an
+        # async_result that will be set if the children change in the
+        # future
+        data, data_async = async_object.get()
+
+    .. note::
+
+        This Watch is different from :class:`DataWatch` and
+        :class:`ChildrenWatch` as it only returns once, does not take
+        a function that is called, and provides an
+        :class:`~kazoo.interfaces.IAsyncResult` object that can be
+        checked to see if the children have changed later.
+
+    """
+
+
+    def __init__(self, client, path, time_boundary=15):
+        self.client = client
+        self.path = path
+        self.data = None
+        self.time_boundary = time_boundary
+        self.data_changed = client.handler.event_object()
+
+    def start(self):
+        """Begin the watching process asynchronously
+        :returns: An :class:`~kazoo.interfaces.IAsyncResult` instance
+                  that will be set when no change has occurred to the
+                  data for time boundary seconds.
+        """
+        self.asy = asy = self.client.handler.async_result()
+        self.client.handler.spawn(self._inner_start)
+        return asy
+
+    def _inner_start(self):
+        try:
+            while True:
+                async_result = self.client.handler.async_result()
+                self.data = self.client.retry(
+                    self.client.get, self.path,
+                    partial(self._data_watcher, async_result))
+                self.client.handler.sleep_func(self.time_boundary)
+
+                if self.data_changed.is_set():
+                    self.data_changed.clear()
+                else:
+                    break
+
+            self.asy.set((self.data, async_result))
+        except Exception as ex:
+            self.asy.set_exception(ex)
+
+    def _data_watcher(self, async, event):
+        self.data_changed.set()
+        async.set(time.time())
+
